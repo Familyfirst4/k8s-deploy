@@ -10,20 +10,19 @@ import {Kubectl, Resource} from '../types/kubectl'
 import {deployPodCanary} from './canary/podCanaryHelper'
 import {deploySMICanary} from './canary/smiCanaryHelper'
 import {DeploymentConfig} from '../types/deploymentConfig'
-import {deployBlueGreenService} from './blueGreen/serviceBlueGreenHelper'
-import {deployBlueGreenIngress} from './blueGreen/ingressBlueGreenHelper'
-import {deployBlueGreenSMI} from './blueGreen/smiBlueGreenHelper'
+import {deployBlueGreen} from './blueGreen/deploy'
 import {DeploymentStrategy} from '../types/deploymentStrategy'
 import * as core from '@actions/core'
 import {
    parseTrafficSplitMethod,
    TrafficSplitMethod
 } from '../types/trafficSplitMethod'
-import {parseRouteStrategy, RouteStrategy} from '../types/routeStrategy'
+import {parseRouteStrategy} from '../types/routeStrategy'
 import {ExecOutput} from '@actions/exec'
 import {
    getWorkflowAnnotationKeyLabel,
-   getWorkflowAnnotations
+   getWorkflowAnnotations,
+   cleanLabel
 } from '../utilities/workflowAnnotationUtils'
 import {
    annotateChildPods,
@@ -35,6 +34,8 @@ import {
    normalizeWorkflowStrLabel
 } from '../utilities/githubUtils'
 import {getDeploymentConfig} from '../utilities/dockerUtils'
+import {DeployResult} from '../types/deployResult'
+import {ClusterType} from '../actions/deploy'
 
 export async function deployManifests(
    files: string[],
@@ -44,30 +45,37 @@ export async function deployManifests(
 ): Promise<string[]> {
    switch (deploymentStrategy) {
       case DeploymentStrategy.CANARY: {
-         const {result, newFilePaths} =
+         const canaryDeployResult: DeployResult =
             trafficSplitMethod == TrafficSplitMethod.SMI
                ? await deploySMICanary(files, kubectl)
                : await deployPodCanary(files, kubectl)
 
-         checkForErrors([result])
-         return newFilePaths
+         checkForErrors([canaryDeployResult.execResult])
+         return canaryDeployResult.manifestFiles
       }
 
       case DeploymentStrategy.BLUE_GREEN: {
          const routeStrategy = parseRouteStrategy(
             core.getInput('route-method', {required: true})
          )
-
-         const {result, newFilePaths} = await Promise.resolve(
-            (routeStrategy == RouteStrategy.INGRESS &&
-               deployBlueGreenIngress(kubectl, files)) ||
-               (routeStrategy == RouteStrategy.SMI &&
-                  deployBlueGreenSMI(kubectl, files)) ||
-               deployBlueGreenService(kubectl, files)
+         const blueGreenDeployment = await deployBlueGreen(
+            kubectl,
+            files,
+            routeStrategy
+         )
+         core.debug(
+            `objects deployed for ${routeStrategy}: ${JSON.stringify(
+               blueGreenDeployment.objects
+            )} `
          )
 
-         checkForErrors([result])
-         return newFilePaths
+         checkForErrors([blueGreenDeployment.deployResult.execResult])
+         const deployedManifestFiles =
+            blueGreenDeployment.deployResult.manifestFiles
+         core.debug(
+            `from blue-green service, deployed manifest files are ${deployedManifestFiles}`
+         )
+         return deployedManifestFiles
       }
 
       case DeploymentStrategy.BASIC: {
@@ -103,19 +111,24 @@ function appendStableVersionLabelToResource(files: string[]): string[] {
    const newObjectsList = []
 
    files.forEach((filePath: string) => {
-      const fileContents = fs.readFileSync(filePath).toString()
+      try {
+         const fileContents = fs.readFileSync(filePath).toString()
 
-      yaml.safeLoadAll(fileContents, function (inputObject) {
-         const {kind} = inputObject
+         yaml.loadAll(fileContents, function (inputObject) {
+            const kind = (inputObject as {kind: string}).kind
 
-         if (isDeploymentEntity(kind)) {
-            const updatedObject =
-               canaryDeploymentHelper.markResourceAsStable(inputObject)
-            newObjectsList.push(updatedObject)
-         } else {
-            manifestFiles.push(filePath)
-         }
-      })
+            if (isDeploymentEntity(kind)) {
+               const updatedObject =
+                  canaryDeploymentHelper.markResourceAsStable(inputObject)
+               newObjectsList.push(updatedObject)
+            } else {
+               manifestFiles.push(filePath)
+            }
+         })
+      } catch (error) {
+         core.error(`Failed to parse file at ${filePath}: ${error.message}`)
+         throw error
+      }
    })
 
    const updatedManifestFiles = fileHelper.writeObjectsToFile(newObjectsList)
@@ -126,40 +139,58 @@ function appendStableVersionLabelToResource(files: string[]): string[] {
 
 export async function checkManifestStability(
    kubectl: Kubectl,
-   resources: Resource[]
+   resources: Resource[],
+   resourceType: ClusterType
 ): Promise<void> {
-   await KubernetesManifestUtility.checkManifestStability(kubectl, resources)
+   await KubernetesManifestUtility.checkManifestStability(
+      kubectl,
+      resources,
+      resourceType
+   )
 }
 
 export async function annotateAndLabelResources(
    files: string[],
    kubectl: Kubectl,
-   resourceTypes: Resource[],
-   allPods: any
+   resourceTypes: Resource[]
 ) {
+   const defaultWorkflowFileName = 'k8s-deploy-failed-workflow-annotation'
    const githubToken = core.getInput('token')
-   const workflowFilePath = await getWorkflowFilePath(githubToken)
+   let workflowFilePath
+   try {
+      workflowFilePath = await getWorkflowFilePath(githubToken)
+   } catch (ex) {
+      core.warning(`Failed to extract workflow file name: ${ex}`)
+      workflowFilePath = defaultWorkflowFileName
+   }
 
    const deploymentConfig = await getDeploymentConfig()
-   const annotationKeyLabel = getWorkflowAnnotationKeyLabel(workflowFilePath)
+   const annotationKeyLabel = getWorkflowAnnotationKeyLabel()
 
-   await annotateResources(
-      files,
-      kubectl,
-      resourceTypes,
-      allPods,
-      annotationKeyLabel,
-      workflowFilePath,
-      deploymentConfig
+   const shouldAnnotateResources = !(
+      core.getInput('annotate-resources').toLowerCase() === 'false'
    )
-   await labelResources(files, kubectl, annotationKeyLabel)
+
+   if (shouldAnnotateResources) {
+      await annotateResources(
+         files,
+         kubectl,
+         resourceTypes,
+         annotationKeyLabel,
+         workflowFilePath,
+         deploymentConfig
+      ).catch((err) => core.warning(`Failed to annotate resources: ${err} `))
+   }
+
+   await labelResources(files, kubectl, annotationKeyLabel).catch((err) =>
+      core.warning(`Failed to label resources: ${err}`)
+   )
 }
 
 async function annotateResources(
    files: string[],
    kubectl: Kubectl,
    resourceTypes: Resource[],
-   allPods: any,
    annotationKey: string,
    workflowFilePath: string,
    deploymentConfig: DeploymentConfig
@@ -172,6 +203,23 @@ async function annotateResources(
       annotationKey
    )
 
+   if (core.isDebug()) {
+      try {
+         core.debug(`files getting annotated are ${JSON.stringify(files)}`)
+         for (const filePath of files) {
+            core.debug('printing objects getting annotated...')
+            const fileContents = fs.readFileSync(filePath).toString()
+            const inputObjects = yaml.loadAll(fileContents)
+            for (const inputObject of inputObjects) {
+               core.debug(`object: ${JSON.stringify(inputObject)}`)
+            }
+         }
+      } catch (error) {
+         core.error(`Failed to load and parse files: ${error.message}`)
+         throw error
+      }
+   }
+
    const annotationKeyValStr = `${annotationKey}=${getWorkflowAnnotations(
       lastSuccessSha,
       workflowFilePath,
@@ -183,10 +231,27 @@ async function annotateResources(
    )
    if (annotateNamespace) {
       annotateResults.push(
-         await kubectl.annotate('namespace', namespace, annotationKeyValStr)
+         await kubectl.annotate(
+            'namespace',
+            namespace,
+            annotationKeyValStr,
+            namespace
+         )
       )
    }
-   annotateResults.push(await kubectl.annotateFiles(files, annotationKeyValStr))
+
+   for (const file of files) {
+      try {
+         const annotateResult = await kubectl.annotateFiles(
+            file,
+            annotationKeyValStr,
+            namespace
+         )
+         annotateResults.push(annotateResult)
+      } catch (e) {
+         core.warning(`failed to annotate resource: ${e}`)
+      }
+   }
 
    for (const resource of resourceTypes) {
       if (
@@ -198,8 +263,8 @@ async function annotateResources(
                kubectl,
                resource.type,
                resource.name,
-               annotationKeyValStr,
-               allPods
+               resource.namespace,
+               annotationKeyValStr
             )
          ).forEach((execResult) => annotateResults.push(execResult))
       }
@@ -214,11 +279,20 @@ async function labelResources(
    label: string
 ) {
    const labels = [
-      `workflowFriendlyName=${normalizeWorkflowStrLabel(
-         process.env.GITHUB_WORKFLOW
+      `workflowFriendlyName=${cleanLabel(
+         normalizeWorkflowStrLabel(process.env.GITHUB_WORKFLOW)
       )}`,
-      `workflow=${label}`
+      `workflow=${cleanLabel(label)}`
    ]
 
-   checkForErrors([await kubectl.labelFiles(files, labels)], true)
+   const labelResults = []
+   for (const file of files) {
+      try {
+         const labelResult = await kubectl.labelFiles(file, labels)
+         labelResults.push(labelResult)
+      } catch (e) {
+         core.warning(`failed to annotate resource: ${e}`)
+      }
+   }
+   checkForErrors(labelResults, true)
 }

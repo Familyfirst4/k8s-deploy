@@ -5,7 +5,8 @@ import {promote} from './actions/promote'
 import {reject} from './actions/reject'
 import {Action, parseAction} from './types/action'
 import {parseDeploymentStrategy} from './types/deploymentStrategy'
-import {getFilesFromDirectories} from './utilities/fileUtils'
+import {getFilesFromDirectoriesAndURLs} from './utilities/fileUtils'
+import {PrivateKubectl} from './types/privatekubectl'
 
 export async function run() {
    // verify kubeconfig is set
@@ -25,11 +26,25 @@ export async function run() {
       .map((manifest) => manifest.trim()) // remove surrounding whitespace
       .filter((manifest) => manifest.length > 0) // remove any blanks
 
-   const fullManifestFilePaths = getFilesFromDirectories(manifestFilePaths)
-   // create kubectl
+   const fullManifestFilePaths =
+      await getFilesFromDirectoriesAndURLs(manifestFilePaths)
    const kubectlPath = await getKubectlPath()
    const namespace = core.getInput('namespace') || 'default'
-   const kubectl = new Kubectl(kubectlPath, namespace, true)
+   const isPrivateCluster =
+      core.getInput('private-cluster').toLowerCase() === 'true'
+   const resourceGroup = core.getInput('resource-group') || ''
+   const resourceName = core.getInput('name') || ''
+   const skipTlsVerify = core.getBooleanInput('skip-tls-verify')
+
+   const kubectl = isPrivateCluster
+      ? new PrivateKubectl(
+           kubectlPath,
+           namespace,
+           skipTlsVerify,
+           resourceGroup,
+           resourceName
+        )
+      : new Kubectl(kubectlPath, namespace, skipTlsVerify)
 
    // run action
    switch (action) {

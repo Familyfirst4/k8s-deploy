@@ -6,7 +6,6 @@ import {
    getResources,
    updateManifestFiles
 } from '../utilities/manifestUpdateUtils'
-import {routeBlueGreen} from '../strategyHelpers/blueGreen/blueGreenHelper'
 import {
    annotateAndLabelResources,
    checkManifestStability,
@@ -14,7 +13,12 @@ import {
 } from '../strategyHelpers/deploymentHelper'
 import {DeploymentStrategy} from '../types/deploymentStrategy'
 import {parseTrafficSplitMethod} from '../types/trafficSplitMethod'
-import {parseRouteStrategy} from '../types/routeStrategy'
+export const ResourceTypeManagedCluster =
+   'Microsoft.ContainerService/managedClusters'
+export const ResourceTypeFleet = 'Microsoft.ContainerService/fleets'
+export type ClusterType =
+   | typeof ResourceTypeManagedCluster
+   | typeof ResourceTypeFleet
 
 export async function deploy(
    kubectl: Kubectl,
@@ -23,7 +27,7 @@ export async function deploy(
 ) {
    // update manifests
    const inputManifestFiles: string[] = updateManifestFiles(manifestFilePaths)
-   core.debug('Input manifest files: ' + inputManifestFiles)
+   core.debug(`Input manifest files: ${inputManifestFiles}`)
 
    // deploy manifests
    core.startGroup('Deploying manifests')
@@ -36,28 +40,31 @@ export async function deploy(
       kubectl,
       trafficSplitMethod
    )
+   core.debug(`Deployed manifest files: ${deployedManifestFiles}`)
    core.endGroup()
-   core.debug('Deployed manifest files: ' + deployedManifestFiles)
 
    // check manifest stability
    core.startGroup('Checking manifest stability')
+   const resourceTypeInput =
+      core.getInput('resource-type') || ResourceTypeManagedCluster
    const resourceTypes: Resource[] = getResources(
       deployedManifestFiles,
       models.DEPLOYMENT_TYPES.concat([
          KubernetesConstants.DiscoveryAndLoadBalancerResource.SERVICE
       ])
    )
-   await checkManifestStability(kubectl, resourceTypes)
-   core.endGroup()
 
-   if (deploymentStrategy == DeploymentStrategy.BLUE_GREEN) {
-      core.startGroup('Routing blue green')
-      const routeStrategy = parseRouteStrategy(
-         core.getInput('route-method', {required: true})
-      )
-      await routeBlueGreen(kubectl, inputManifestFiles, routeStrategy)
-      core.endGroup()
+   if (
+      resourceTypeInput !== ResourceTypeManagedCluster &&
+      resourceTypeInput !== ResourceTypeFleet
+   ) {
+      let errMsg = `Invalid resource type: ${resourceTypeInput}. Supported resource types are: ${ResourceTypeManagedCluster} (default), ${ResourceTypeFleet}`
+      core.setFailed(errMsg)
+      throw new Error(errMsg)
    }
+
+   await checkManifestStability(kubectl, resourceTypes, resourceTypeInput)
+   core.endGroup()
 
    // print ingresses
    core.startGroup('Printing ingresses')
@@ -67,24 +74,19 @@ export async function deploy(
    for (const ingressResource of ingressResources) {
       await kubectl.getResource(
          KubernetesConstants.DiscoveryAndLoadBalancerResource.INGRESS,
-         ingressResource.name
+         ingressResource.name,
+         false,
+         ingressResource.namespace
       )
    }
    core.endGroup()
 
    // annotate resources
    core.startGroup('Annotating resources')
-   let allPods
-   try {
-      allPods = JSON.parse((await kubectl.getAllPods()).stdout)
-   } catch (e) {
-      core.debug('Unable to parse pods: ' + e)
-   }
    await annotateAndLabelResources(
       deployedManifestFiles,
       kubectl,
-      resourceTypes,
-      allPods
+      resourceTypes
    )
    core.endGroup()
 }

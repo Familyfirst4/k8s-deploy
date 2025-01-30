@@ -6,6 +6,7 @@ inputs:
    namespace:
       description: 'Choose the target Kubernetes namespace. If the namespace is not provided, the commands will run in the default namespace.'
       required: false
+      default: default
    manifests:
       description: 'Path to the manifest files which will be used for deployment.'
       required: true
@@ -35,10 +36,13 @@ inputs:
       description: 'Traffic split method to be used. Allowed values are pod and smi'
       required: false
       default: 'pod'
+   traffic-split-annotations:
+      description: 'Annotations in the form of key/value pair to be added to TrafficSplit. Relevant only if deployement strategy is blue-green or canary'
+      required: false
    baseline-and-canary-replicas:
       description: 'Baseline and canary replicas count. Valid value between 0 to 100 (inclusive)'
       required: false
-      default: 0
+      default: ''
    percentage:
       description: 'Percentage of traffic redirect to canary deployment'
       required: false
@@ -55,13 +59,30 @@ inputs:
       description: 'Github token'
       default: ${{ github.token }}
       required: true
-   annotate-namespace:
-      description: 'Annotate the target namespace'
+   annotate-resources:
+      description: 'Annotate the resources. If set to false all annotations are skipped completely.'
       required: false
       default: true
+   annotate-namespace:
+      description: 'Annotate the target namespace. Ignored when annotate-resources is set to false.'
+      required: false
+      default: true
+   private-cluster:
+      description: 'True if cluster is AKS private cluster'
+      required: false
+      default: false
+   resource-group:
+      description: 'Name of resource group - Only required if using private cluster'
+      required: false
+   name:
+      description: 'Resource group name - Only required if using private cluster'
+      required: false
+   skip-tls-verify:
+      description: True if the insecure-skip-tls-verify option should be used. Input should be 'true' or 'false'.
+      default: false
 
 branding:
    color: 'green'
 runs:
-   using: 'node16'
+   using: 'node20'
    main: 'lib/index.js'

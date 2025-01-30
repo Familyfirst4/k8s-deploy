@@ -1,13 +1,8 @@
 import {DeploymentConfig} from '../types/deploymentConfig'
 
-const ANNOTATION_PREFIX = 'actions.github.com/'
+const ANNOTATION_PREFIX = 'actions.github.com'
 
-export function prefixObjectKeys(obj: any, prefix: string): any {
-   return Object.keys(obj).reduce((newObj, key) => {
-      newObj[prefix + key] = obj[key]
-      return newObj
-   }, {})
-}
+export const VALID_LABEL_REGEX = /([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]/
 
 export function getWorkflowAnnotations(
    lastSuccessRunSha: string,
@@ -31,19 +26,30 @@ export function getWorkflowAnnotations(
       helmChartPaths: deploymentConfig.helmChartFilePaths,
       provider: 'GitHub'
    }
-   const prefixedAnnotationObject = prefixObjectKeys(
-      annotationObject,
-      ANNOTATION_PREFIX
-   )
-   return JSON.stringify(prefixedAnnotationObject)
+   return JSON.stringify(annotationObject)
 }
 
-export function getWorkflowAnnotationKeyLabel(
-   workflowFilePath: string
-): string {
-   const hashKey = require('crypto')
-      .createHash('MD5')
-      .update(`${process.env.GITHUB_REPOSITORY}/${workflowFilePath}`)
-      .digest('hex')
-   return `githubWorkflow_${hashKey}`
+export function getWorkflowAnnotationKeyLabel(): string {
+   return `${ANNOTATION_PREFIX}/k8s-deploy`
+}
+
+/**
+ * Cleans label to match valid kubernetes label specification by removing invalid characters
+ * @param label
+ * @returns cleaned label
+ */
+export function cleanLabel(label: string): string {
+   let removedInvalidChars = removeInvalidLabelCharacters(label)
+
+   const regexResult = VALID_LABEL_REGEX.exec(removedInvalidChars) || [
+      'github-workflow-file'
+   ]
+   return regexResult[0]
+}
+
+export function removeInvalidLabelCharacters(label: string): string {
+   return label
+      .replace(/\s/gi, '_')
+      .replace(/[\/\\\|]/gi, '-')
+      .replace(/[^-A-Za-z0-9_.]/gi, '')
 }

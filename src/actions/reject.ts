@@ -2,9 +2,13 @@ import * as core from '@actions/core'
 import * as canaryDeploymentHelper from '../strategyHelpers/canary/canaryHelper'
 import * as SMICanaryDeploymentHelper from '../strategyHelpers/canary/smiCanaryHelper'
 import {Kubectl} from '../types/kubectl'
-import {rejectBlueGreenService} from '../strategyHelpers/blueGreen/serviceBlueGreenHelper'
-import {rejectBlueGreenIngress} from '../strategyHelpers/blueGreen/ingressBlueGreenHelper'
-import {rejectBlueGreenSMI} from '../strategyHelpers/blueGreen/smiBlueGreenHelper'
+import {BlueGreenManifests} from '../types/blueGreenTypes'
+import {
+   rejectBlueGreenIngress,
+   rejectBlueGreenService,
+   rejectBlueGreenSMI
+} from '../strategyHelpers/blueGreen/reject'
+import {getManifestObjects} from '../strategyHelpers/blueGreen/blueGreenHelper'
 import {DeploymentStrategy} from '../types/deploymentStrategy'
 import {
    parseTrafficSplitMethod,
@@ -36,33 +40,38 @@ async function rejectCanary(kubectl: Kubectl, manifests: string[]) {
       core.getInput('traffic-split-method', {required: true})
    )
    if (trafficSplitMethod == TrafficSplitMethod.SMI) {
-      core.info('Rejecting deployment with SMI canary strategy')
+      core.startGroup('Rejecting deployment with SMI canary strategy')
       includeServices = true
       await SMICanaryDeploymentHelper.redirectTrafficToStableDeployment(
          kubectl,
          manifests
       )
+      core.endGroup()
    }
 
-   core.info('Deleting baseline and canary workloads')
+   core.startGroup('Deleting baseline and canary workloads')
    await canaryDeploymentHelper.deleteCanaryDeployment(
       kubectl,
       manifests,
       includeServices
    )
+   core.endGroup()
 }
 
 async function rejectBlueGreen(kubectl: Kubectl, manifests: string[]) {
-   core.info('Rejecting deployment with blue green strategy')
-
    const routeStrategy = parseRouteStrategy(
       core.getInput('route-method', {required: true})
    )
+   core.startGroup('Rejecting deployment with blue green strategy')
+   core.info(`using routeMethod ${routeStrategy}`)
+   const manifestObjects: BlueGreenManifests = getManifestObjects(manifests)
+
    if (routeStrategy == RouteStrategy.INGRESS) {
-      await rejectBlueGreenIngress(kubectl, manifests)
+      await rejectBlueGreenIngress(kubectl, manifestObjects)
    } else if (routeStrategy == RouteStrategy.SMI) {
-      await rejectBlueGreenSMI(kubectl, manifests)
+      await rejectBlueGreenSMI(kubectl, manifestObjects)
    } else {
-      await rejectBlueGreenService(kubectl, manifests)
+      await rejectBlueGreenService(kubectl, manifestObjects)
    }
+   core.endGroup()
 }
